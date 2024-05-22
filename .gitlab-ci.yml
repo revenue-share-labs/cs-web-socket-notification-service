@@ -1,0 +1,66 @@
+variables:
+  IMAGE_PATH: $DOCKER_REGISTRY/$CI_PROJECT_NAME
+
+stages:
+  - test
+  - build
+  - deploy
+  - release
+
+include:
+  - project: 'x.la/contracts/shared-ci-library'
+    ref: main
+    file:
+      - 'jobs/tests.gitlab-ci.yaml'
+      - 'jobs/build.gitlab-ci.yaml'
+
+.before_script:
+  before_script:
+    - |
+      if [[ "$CI_COMMIT_TAG" == "" ]]; then
+        export IMAGE_TAG="$CI_COMMIT_REF_SLUG"
+      else
+        export IMAGE_TAG="$CI_COMMIT_TAG"
+      fi
+    - echo "DOCKER REGISTRY IMAGE >> $IMAGE_PATH:$IMAGE_TAG"
+
+.deploy_scripts:
+  stage: deploy
+  image: $DEPLOY_IMAGE
+  extends: .before_script
+  script:
+    - aws --region $AWS_DEFAULT_REGION eks update-kubeconfig --name $EKS_CLUSTER_NAME
+    - cd /deploy
+    - echo "Helm args >> ${HELM_ARGS}"
+    - helm dependency update $CI_PROJECT_NAME
+    - helm upgrade --install ${CI_PROJECT_NAME} -n ${CI_ENVIRONMENT_NAME}
+      --values ${CI_PROJECT_NAME}/values-${CI_ENVIRONMENT_NAME}.yaml
+      --set theone.image.tag=${IMAGE_TAG}
+      --set theone.image.repository=${IMAGE_PATH}
+      --set theone.env.GITHASH=${CI_COMMIT_SHA}
+      ${CI_PROJECT_NAME}
+      ${HELM_ARGS}
+  when: manual
+  tags: ["deploy"]
+
+deploy:dev:
+  extends: .deploy_scripts
+  environment:
+    name: dev
+
+deploy:uat:
+  extends: .deploy_scripts
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+  environment:
+    name: uat
+
+deploy:prod:
+  stage: release
+  extends: .deploy_scripts
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+  environment:
+    name: core
+  needs: ["deploy:uat"]
